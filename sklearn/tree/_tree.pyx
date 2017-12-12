@@ -37,6 +37,7 @@ from ._utils cimport PriorityHeap
 from ._utils cimport PriorityHeapRecord
 from ._utils cimport safe_realloc
 from ._utils cimport sizet_ptr_to_ndarray
+from libc.stdio cimport printf
 
 cdef extern from "numpy/arrayobject.h":
     object PyArray_NewFromDescr(object subtype, np.dtype descr,
@@ -92,6 +93,7 @@ cdef class TreeBuilder:
 
     cpdef build(self, Tree tree, object X, np.ndarray y,
                 np.ndarray sample_weight=None,
+                np.ndarray discrete=None,
                 np.ndarray X_idx_sorted=None):
         """Build a decision tree from the training set (X, y)."""
         pass
@@ -144,6 +146,7 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
 
     cpdef build(self, Tree tree, object X, np.ndarray y,
                 np.ndarray sample_weight=None,
+                np.ndarray discrete=None,
                 np.ndarray X_idx_sorted=None):
         """Build a decision tree from the training set (X, y)."""
 
@@ -153,6 +156,11 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
         cdef DOUBLE_t* sample_weight_ptr = NULL
         if sample_weight is not None:
             sample_weight_ptr = <DOUBLE_t*> sample_weight.data
+
+        cdef SIZE_t* discrete_array = NULL
+        if discrete is not None:
+            discrete_array = <SIZE_t*> discrete.data
+        tree.discrete = discrete_array
 
         # Initial capacity
         cdef int init_capacity
@@ -174,7 +182,7 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
         cdef double min_impurity_split = self.min_impurity_split
 
         # Recursive partition (without actual recursion)
-        splitter.init(X, y, sample_weight_ptr, X_idx_sorted)
+        splitter.init(X, y, sample_weight_ptr, discrete_array, X_idx_sorted)
 
         cdef SIZE_t start
         cdef SIZE_t end
@@ -201,6 +209,7 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
         with nogil:
             # push root node onto stack
             rc = stack.push(0, n_node_samples, 0, _TREE_UNDEFINED, 0, INFINITY, 0)
+
             if rc == -1:
                 # got return code -1 - out-of-memory
                 with gil:
@@ -245,6 +254,8 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
                                          split.threshold, impurity, n_node_samples,
                                          weighted_n_node_samples)
 
+                #printf("%.1f\n", impurity)
+
                 if node_id == <SIZE_t>(-1):
                     rc = -1
                     break
@@ -252,6 +263,9 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
                 # Store value for all nodes, to facilitate tree/model
                 # inspection and interpretation
                 splitter.node_value(tree.value + node_id * tree.value_stride)
+
+
+
 
                 if not is_leaf:
                     # Push right child on stack
@@ -315,6 +329,7 @@ cdef class BestFirstTreeBuilder(TreeBuilder):
 
     cpdef build(self, Tree tree, object X, np.ndarray y,
                 np.ndarray sample_weight=None,
+                np.ndarray discrete=None,
                 np.ndarray X_idx_sorted=None):
         """Build a decision tree from the training set (X, y)."""
 
@@ -325,6 +340,11 @@ cdef class BestFirstTreeBuilder(TreeBuilder):
         if sample_weight is not None:
             sample_weight_ptr = <DOUBLE_t*> sample_weight.data
 
+        cdef SIZE_t* discrete_array = NULL
+        if discrete is not None:
+            discrete_array = <SIZE_t*> discrete.data
+        tree.discrete = discrete_array
+
         # Parameters
         cdef Splitter splitter = self.splitter
         cdef SIZE_t max_leaf_nodes = self.max_leaf_nodes
@@ -333,7 +353,7 @@ cdef class BestFirstTreeBuilder(TreeBuilder):
         cdef SIZE_t min_samples_split = self.min_samples_split
 
         # Recursive partition (without actual recursion)
-        splitter.init(X, y, sample_weight_ptr, X_idx_sorted)
+        splitter.init(X, y, sample_weight_ptr, discrete_array, X_idx_sorted)
 
         cdef PriorityHeap frontier = PriorityHeap(INITIAL_STACK_SIZE)
         cdef PriorityHeapRecord record
@@ -620,6 +640,8 @@ cdef class Tree:
         self.capacity = 0
         self.value = NULL
         self.nodes = NULL
+        self.discrete = NULL
+
 
     def __dealloc__(self):
         """Destructor."""
@@ -802,17 +824,34 @@ cdef class Tree:
         cdef Node* node = NULL
         cdef SIZE_t i = 0
 
+
+
         with nogil:
             for i in range(n_samples):
                 node = self.nodes
                 # While node not a leaf
                 while node.left_child != _TREE_LEAF:
                     # ... and node.right_child != _TREE_LEAF:
-                    if X_ptr[X_sample_stride * i +
-                             X_fx_stride * node.feature] <= node.threshold:
-                        node = &self.nodes[node.left_child]
+
+                    if self.discrete != NULL and self.discrete[node.feature] == 1:
+                        #printf("%d\n",111)
+                        #printf("%d\n",node.feature)
+                        #printf("%d\n",self.discrete[node.feature])
+                        #printf("%d\n",node.threshold)
+                        #printf("%d\n",i)
+
+                        if X_ptr[X_sample_stride * i +
+                                 X_fx_stride * node.feature] == node.threshold:
+                            node = &self.nodes[node.left_child]
+
+                        else:
+                            node = &self.nodes[node.right_child]
                     else:
-                        node = &self.nodes[node.right_child]
+                        if X_ptr[X_sample_stride * i +
+                                 X_fx_stride * node.feature] <= node.threshold:
+                            node = &self.nodes[node.left_child]
+                        else:
+                            node = &self.nodes[node.right_child]
 
                 out_ptr[i] = <SIZE_t>(node - self.nodes)  # node offset
 
@@ -942,11 +981,20 @@ cdef class Tree:
                     indices_ptr[indptr_ptr[i + 1]] = <SIZE_t>(node - self.nodes)
                     indptr_ptr[i + 1] += 1
 
-                    if X_ptr[X_sample_stride * i +
-                             X_fx_stride * node.feature] <= node.threshold:
-                        node = &self.nodes[node.left_child]
+                    if self.discrete != NULL and self.discrete[node.feature] == 1:
+
+                        if X_ptr[X_sample_stride * i +
+                                 X_fx_stride * node.feature] == node.threshold:
+                            node = &self.nodes[node.left_child]
+
+                        else:
+                            node = &self.nodes[node.right_child]
                     else:
-                        node = &self.nodes[node.right_child]
+                        if X_ptr[X_sample_stride * i +
+                                 X_fx_stride * node.feature] <= node.threshold:
+                            node = &self.nodes[node.left_child]
+                        else:
+                            node = &self.nodes[node.right_child]
 
                 # Add the leave node
                 indices_ptr[indptr_ptr[i + 1]] = <SIZE_t>(node - self.nodes)
@@ -1078,6 +1126,13 @@ cdef class Tree:
                         node.weighted_n_node_samples * node.impurity -
                         left.weighted_n_node_samples * left.impurity -
                         right.weighted_n_node_samples * right.impurity)
+
+
+                    #if node.feature == 4:
+                        #printf("%.1f\n",node.impurity)
+                        #printf("%.1f\n",left.impurity)
+                        #printf("%.1f\n\n",right.impurity)
+
                 node += 1
 
         importances /= nodes[0].weighted_n_node_samples

@@ -26,6 +26,10 @@ cdef struct SplitRecord:
     SIZE_t pos             # Split samples array at the given position,
                            # i.e. count of samples below threshold for feature.
                            # pos is >= end if the node is a leaf.
+    SIZE_t pos1
+    SIZE_t pos2
+    SIZE_t discrete
+
     double threshold       # Threshold to split at.
     double improvement     # Impurity improvement given parent node.
     double impurity_left   # Impurity of the left split.
@@ -63,6 +67,7 @@ cdef class Splitter:
     cdef DOUBLE_t* y
     cdef SIZE_t y_stride
     cdef DOUBLE_t* sample_weight
+    cdef SIZE_t* discrete
 
     # The samples vector `samples` is maintained by the Splitter object such
     # that the samples contained in a node are contiguous. With this setting,
@@ -83,6 +88,7 @@ cdef class Splitter:
     # Methods
     cdef int init(self, object X, np.ndarray y,
                   DOUBLE_t* sample_weight,
+                  SIZE_t* discrete_array,
                   np.ndarray X_idx_sorted=*) except -1
 
     cdef int node_reset(self, SIZE_t start, SIZE_t end,

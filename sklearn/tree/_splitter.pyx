@@ -21,6 +21,7 @@ from libc.stdlib cimport free
 from libc.stdlib cimport qsort
 from libc.string cimport memcpy
 from libc.string cimport memset
+from libc.stdio cimport printf
 
 import numpy as np
 cimport numpy as np
@@ -47,6 +48,9 @@ cdef inline void _init_split(SplitRecord* self, SIZE_t start_pos) nogil:
     self.impurity_left = INFINITY
     self.impurity_right = INFINITY
     self.pos = start_pos
+    self.pos1 = start_pos
+    self.pos2 = start_pos
+    self.discrete = 0
     self.feature = 0
     self.threshold = 0.
     self.improvement = -INFINITY
@@ -95,12 +99,17 @@ cdef class Splitter:
         self.y = NULL
         self.y_stride = 0
         self.sample_weight = NULL
+        self.discrete = NULL
 
         self.max_features = max_features
         self.min_samples_leaf = min_samples_leaf
         self.min_weight_leaf = min_weight_leaf
         self.random_state = random_state
         self.presort = presort
+
+
+
+
 
     def __dealloc__(self):
         """Destructor."""
@@ -120,6 +129,7 @@ cdef class Splitter:
                    object X,
                    np.ndarray[DOUBLE_t, ndim=2, mode="c"] y,
                    DOUBLE_t* sample_weight,
+                   SIZE_t* discrete_array,
                    np.ndarray X_idx_sorted=None) except -1:
         """Initialize the splitter.
 
@@ -145,6 +155,7 @@ cdef class Splitter:
         self.rand_r_state = self.random_state.randint(0, RAND_R_MAX)
         cdef SIZE_t n_samples = X.shape[0]
 
+
         # Create a new array which will be used to store nonzero
         # samples from the feature of interest
         cdef SIZE_t* samples = safe_realloc(&self.samples, n_samples)
@@ -169,10 +180,12 @@ cdef class Splitter:
         self.weighted_n_samples = weighted_n_samples
 
         cdef SIZE_t n_features = X.shape[1]
+
         cdef SIZE_t* features = safe_realloc(&self.features, n_features)
 
         for i in range(n_features):
             features[i] = i
+
 
         self.n_features = n_features
 
@@ -183,6 +196,9 @@ cdef class Splitter:
         self.y_stride = <SIZE_t> y.strides[0] / <SIZE_t> y.itemsize
 
         self.sample_weight = sample_weight
+
+        self.discrete = discrete_array
+
         return 0
 
     cdef int node_reset(self, SIZE_t start, SIZE_t end,
@@ -271,6 +287,7 @@ cdef class BaseDenseSplitter(Splitter):
                   object X,
                   np.ndarray[DOUBLE_t, ndim=2, mode="c"] y,
                   DOUBLE_t* sample_weight,
+                  SIZE_t* discrete_array,
                   np.ndarray X_idx_sorted=None) except -1:
         """Initialize the splitter
 
@@ -279,12 +296,14 @@ cdef class BaseDenseSplitter(Splitter):
         """
 
         # Call parent init
-        Splitter.init(self, X, y, sample_weight)
+        Splitter.init(self, X, y, sample_weight, discrete_array)
 
         # Initialize X
         cdef np.ndarray X_ndarray = X
 
         self.X = <DTYPE_t*> X_ndarray.data
+
+        # -leon the number of features in a sample and the number of samples in a feature. The dtype is regarded as the same.
         self.X_sample_stride = <SIZE_t> X.strides[0] / <SIZE_t> X.itemsize
         self.X_feature_stride = <SIZE_t> X.strides[1] / <SIZE_t> X.itemsize
 
@@ -322,6 +341,7 @@ cdef class BestSplitter(BaseDenseSplitter):
         cdef SIZE_t* samples = self.samples
         cdef SIZE_t start = self.start
         cdef SIZE_t end = self.end
+        cdef SIZE_t* discrete = self.discrete
 
         cdef SIZE_t* features = self.features
         cdef SIZE_t* constant_features = self.constant_features
@@ -347,6 +367,8 @@ cdef class BestSplitter(BaseDenseSplitter):
         cdef SIZE_t f_j
         cdef SIZE_t tmp
         cdef SIZE_t p
+        cdef SIZE_t p1
+        cdef SIZE_t p2
         cdef SIZE_t feature_idx_offset
         cdef SIZE_t feature_offset
         cdef SIZE_t i
@@ -381,7 +403,7 @@ cdef class BestSplitter(BaseDenseSplitter):
         while (f_i > n_total_constants and  # Stop early if remaining features
                                             # are constant
                 (n_visited_features < max_features or
-                 # At least one drawn features must be non constant
+                 # At least one drawn features must be non constant ?
                  n_visited_features <= n_found_constants + n_drawn_constants)):
 
             n_visited_features += 1
@@ -447,69 +469,169 @@ cdef class BestSplitter(BaseDenseSplitter):
                     f_i -= 1
                     features[f_i], features[f_j] = features[f_j], features[f_i]
 
+                    is_discrete = discrete[features[f_i]]
+
                     # Evaluate all splits
                     self.criterion.reset()
-                    p = start
 
-                    while p < end:
-                        while (p + 1 < end and
-                               Xf[p + 1] <= Xf[p] + FEATURE_THRESHOLD):
+                    if is_discrete == 1:
+
+
+                        #for i in range(start,end):
+                        #    printf("%.1f,",Xf[i])
+                        #printf("\n,,,233\n")
+
+                        p1 = start
+                        p2 = start
+
+                        while p2 < end:
+
+                            p1 = p2
+
+                            while (p2 + 1 < end and Xf[p2 + 1] <= Xf[p2] + FEATURE_THRESHOLD):
+                                p2 += 1
+
+                            p2 += 1
+
+                            if p2 < end:
+
+                                # Reject if min_samples_leaf is not guaranteed
+                                if (((p2 - p1) < min_samples_leaf) or
+                                        ((end - p2 + p1 - start) < min_samples_leaf)):
+                                    continue
+
+                                self.criterion.update_discrete(p1, p2)
+
+                                # Reject if min_weight_leaf is not satisfied
+                                if ((self.criterion.weighted_n_left < min_weight_leaf) or
+                                        (self.criterion.weighted_n_right < min_weight_leaf)):
+                                    continue
+
+                                current_proxy_improvement = self.criterion.proxy_impurity_improvement()
+
+                                if current_proxy_improvement > best_proxy_improvement:
+                                    best_proxy_improvement = current_proxy_improvement
+                                    current.threshold = Xf[p1]
+                                    current.pos1 = p1
+                                    current.pos2 = p2
+                                    current.pos = p2 - p1 + start
+
+                                    #printf("p1:%d,p2:%d\n",p1,p2)
+
+                                    current.discrete = 1
+
+                                    best = current  # copy
+
+
+                    else:
+                        p = start
+
+                        while p < end:
+
+                            while (p + 1 < end and
+                                   Xf[p + 1] <= Xf[p] + FEATURE_THRESHOLD):
+                                p += 1
+
+                            # (p + 1 >= end) or (X[samples[p + 1], current.feature] >
+                            #                    X[samples[p], current.feature])
                             p += 1
+                            # (p >= end) or (X[samples[p], current.feature] >
+                            #                X[samples[p - 1], current.feature])
 
-                        # (p + 1 >= end) or (X[samples[p + 1], current.feature] >
-                        #                    X[samples[p], current.feature])
-                        p += 1
-                        # (p >= end) or (X[samples[p], current.feature] >
-                        #                X[samples[p - 1], current.feature])
+                            if p < end:
+                                current.pos = p
 
-                        if p < end:
-                            current.pos = p
+                                # Reject if min_samples_leaf is not guaranteed
+                                if (((current.pos - start) < min_samples_leaf) or
+                                        ((end - current.pos) < min_samples_leaf)):
+                                    continue
 
-                            # Reject if min_samples_leaf is not guaranteed
-                            if (((current.pos - start) < min_samples_leaf) or
-                                    ((end - current.pos) < min_samples_leaf)):
-                                continue
+                                self.criterion.update(current.pos)
 
-                            self.criterion.update(current.pos)
+                                # Reject if min_weight_leaf is not satisfied
+                                if ((self.criterion.weighted_n_left < min_weight_leaf) or
+                                        (self.criterion.weighted_n_right < min_weight_leaf)):
+                                    continue
 
-                            # Reject if min_weight_leaf is not satisfied
-                            if ((self.criterion.weighted_n_left < min_weight_leaf) or
-                                    (self.criterion.weighted_n_right < min_weight_leaf)):
-                                continue
+                                current_proxy_improvement = self.criterion.proxy_impurity_improvement()
 
-                            current_proxy_improvement = self.criterion.proxy_impurity_improvement()
+                                if current_proxy_improvement > best_proxy_improvement:
+                                    best_proxy_improvement = current_proxy_improvement
+                                    current.threshold = (Xf[p - 1] + Xf[p]) / 2.0
 
-                            if current_proxy_improvement > best_proxy_improvement:
-                                best_proxy_improvement = current_proxy_improvement
-                                current.threshold = (Xf[p - 1] + Xf[p]) / 2.0
+                                    if current.threshold == Xf[p]:
+                                        current.threshold = Xf[p - 1]
 
-                                if current.threshold == Xf[p]:
-                                    current.threshold = Xf[p - 1]
+                                    current.discrete = 0
 
-                                best = current  # copy
+                                    best = current  # copy
 
         # Reorganize into samples[start:best.pos] + samples[best.pos:end]
-        if best.pos < end:
-            feature_offset = X_feature_stride * best.feature
-            partition_end = end
-            p = start
 
-            while p < partition_end:
-                if X[X_sample_stride * samples[p] + feature_offset] <= best.threshold:
-                    p += 1
 
-                else:
-                    partition_end -= 1
+        if best.discrete == 1:
 
-                    tmp = samples[partition_end]
-                    samples[partition_end] = samples[p]
-                    samples[p] = tmp
 
-            self.criterion.reset()
-            self.criterion.update(best.pos)
-            best.improvement = self.criterion.impurity_improvement(impurity)
-            self.criterion.children_impurity(&best.impurity_left,
-                                             &best.impurity_right)
+            if best.pos < end:
+                feature_offset = X_feature_stride * best.feature
+                partition_end = end
+                p = start
+
+                while p < partition_end:
+                    if X[X_sample_stride * samples[p] + feature_offset] == best.threshold:
+
+                        p += 1
+
+                    else:
+                        partition_end -= 1
+
+                        tmp = samples[partition_end]
+                        samples[partition_end] = samples[p]
+                        samples[p] = tmp
+
+                #printf("pos:%d\n",best.pos)
+                #printf("pos:%d\n",self.criterion.pos)
+
+                self.criterion.reset()
+                self.criterion.update_discrete(start, best.pos)
+                best.improvement = self.criterion.impurity_improvement(impurity)
+                self.criterion.children_impurity(&best.impurity_left,
+                                                 &best.impurity_right)
+
+            #printf("pos:%d\n",best.pos)
+            #printf("pos:%d\n",self.criterion.pos)
+
+
+            #for i in range(start,best.pos+1):
+            #    printf("%.1f,",X[X_sample_stride * samples[i] + feature_offset])
+            #printf("\n,,,666\n")
+            #for i in range(best.pos-1,end):
+            #    printf("%.1f,",X[X_sample_stride * samples[i] + feature_offset])
+            #printf("\n,,,233\n")
+
+        else:
+            if best.pos < end:
+                feature_offset = X_feature_stride * best.feature
+                partition_end = end
+                p = start
+
+                while p < partition_end:
+                    if X[X_sample_stride * samples[p] + feature_offset] <= best.threshold:
+                        p += 1
+
+                    else:
+                        partition_end -= 1
+
+                        tmp = samples[partition_end]
+                        samples[partition_end] = samples[p]
+                        samples[p] = tmp
+
+                self.criterion.reset()
+                self.criterion.update(best.pos)
+                best.improvement = self.criterion.impurity_improvement(impurity)
+                self.criterion.children_impurity(&best.impurity_left,
+                                                 &best.impurity_right)
+
 
         # Reset sample mask
         if self.presort == 1:
@@ -530,6 +652,7 @@ cdef class BestSplitter(BaseDenseSplitter):
         split[0] = best
         n_constant_features[0] = n_total_constants
         return 0
+
 
 
 # Sort n-element arrays pointed to by Xf and samples, simultaneously,
@@ -897,6 +1020,7 @@ cdef class BaseSparseSplitter(Splitter):
                   object X,
                   np.ndarray[DOUBLE_t, ndim=2, mode="c"] y,
                   DOUBLE_t* sample_weight,
+                  SIZE_t* discrete_array,
                   np.ndarray X_idx_sorted=None) except -1:
         """Initialize the splitter
 
@@ -904,7 +1028,7 @@ cdef class BaseSparseSplitter(Splitter):
         or 0 otherwise.
         """
         # Call parent init
-        Splitter.init(self, X, y, sample_weight)
+        Splitter.init(self, X, y, sample_weight, discrete_array)
 
         if not isinstance(X, csc_matrix):
             raise ValueError("X should be in csc format")

@@ -540,6 +540,7 @@ def r2_score(y_true, y_pred, sample_weight=None,
     else:
         weight = 1.
 
+
     numerator = (weight * (y_true - y_pred) ** 2).sum(axis=0,
                                                       dtype=np.float64)
     denominator = (weight * (y_true - np.average(

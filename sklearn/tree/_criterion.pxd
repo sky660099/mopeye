@@ -58,6 +58,7 @@ cdef class Criterion:
                   SIZE_t end) nogil except -1
     cdef int reset(self) nogil except -1
     cdef int reverse_reset(self) nogil except -1
+    cdef int update_discrete(self, SIZE_t pos1, SIZE_t pos2) nogil except -1
     cdef int update(self, SIZE_t new_pos) nogil except -1
     cdef double node_impurity(self) nogil
     cdef void children_impurity(self, double* impurity_left,

@@ -75,7 +75,7 @@ def export_graphviz(decision_tree, out_file=SENTINEL, max_depth=None,
                     feature_names=None, class_names=None, label='all',
                     filled=False, leaves_parallel=False, impurity=True,
                     node_ids=False, proportion=False, rotate=False,
-                    rounded=False, special_characters=False, precision=3):
+                    rounded=False, special_characters=False, precision=3, discrete = None):
     """Export a decision tree in DOT format.
 
     This function generates a GraphViz representation of the decision tree,
@@ -186,9 +186,11 @@ def export_graphviz(decision_tree, out_file=SENTINEL, max_depth=None,
         else:
             # Regression tree or multi-output
             color = list(colors['rgb'][0])
+
             alpha = int(np.round(255 * ((value - colors['bounds'][0]) /
                                         (colors['bounds'][1] -
                                          colors['bounds'][0])), 0))
+
 
         # Return html color code in #RRGGBBAA format
         color.append(alpha)
@@ -231,11 +233,19 @@ def export_graphviz(decision_tree, out_file=SENTINEL, max_depth=None,
                 feature = "X%s%s%s" % (characters[1],
                                        tree.feature[node_id],
                                        characters[2])
+
+            relation = characters[3]
+
+            if discrete is not None and discrete[tree.feature[node_id]] == 1:
+                relation = '='
+
             node_string += '%s %s %s%s' % (feature,
-                                           characters[3],
+                                            relation,
                                            round(tree.threshold[node_id],
                                                  precision),
                                            characters[4])
+
+
 
         # Write impurity
         if impurity:
@@ -245,7 +255,7 @@ def export_graphviz(decision_tree, out_file=SENTINEL, max_depth=None,
                 criterion = "impurity"
             if labels:
                 node_string += '%s = ' % criterion
-            node_string += (str(round(tree.impurity[node_id], precision)) +
+            node_string += (str(round(np.sqrt(tree.impurity[node_id]), precision)) +
                             characters[4])
 
         # Write node sample count
@@ -343,6 +353,7 @@ def export_graphviz(decision_tree, out_file=SENTINEL, max_depth=None,
                     elif (tree.n_classes[0] == 1 and
                           len(np.unique(tree.value)) != 1):
                         # Find max and min values in leaf nodes for regression
+
                         colors['bounds'] = (np.min(tree.value),
                                             np.max(tree.value))
                 if tree.n_outputs == 1:

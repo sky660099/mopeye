@@ -21,6 +21,7 @@ from libc.stdlib cimport free
 from libc.string cimport memcpy
 from libc.string cimport memset
 from libc.math cimport fabs
+from libc.stdio cimport printf
 
 import numpy as np
 cimport numpy as np
@@ -95,6 +96,21 @@ cdef class Criterion:
 
         This method must be implemented by the subclass.
         """
+        pass
+
+    cdef int update_discrete(self, SIZE_t pos1, SIZE_t pos2) nogil except -1:
+        """Updated statistics by moving samples[pos:new_pos] to the left child.
+
+        This updates the collected statistics by moving samples[pos:new_pos]
+        from the right child to the left child. It must be implemented by
+        the subclass.
+
+        Parameters
+        ----------
+        new_pos : SIZE_t
+            New starting index position of the samples in the right child
+        """
+
         pass
 
     cdef int update(self, SIZE_t new_pos) nogil except -1:
@@ -822,6 +838,47 @@ cdef class RegressionCriterion(Criterion):
         self.pos = self.end
         return 0
 
+    cdef int update_discrete(self, SIZE_t pos1, SIZE_t pos2) nogil except -1:
+        cdef double* sum_left = self.sum_left
+        cdef double* sum_right = self.sum_right
+        cdef double* sum_total = self.sum_total
+
+        cdef double* sample_weight = self.sample_weight
+        cdef SIZE_t* samples = self.samples
+
+        cdef DOUBLE_t* y = self.y
+        cdef SIZE_t pos = self.pos
+        cdef SIZE_t end = self.end
+        cdef SIZE_t i
+        cdef SIZE_t p
+        cdef SIZE_t k
+        cdef DOUBLE_t w = 1.0
+        cdef DOUBLE_t y_ik
+
+        self.reset()
+
+        for p in range(pos1, pos2):
+            i = samples[p]
+
+            if sample_weight != NULL:
+                w = sample_weight[i]
+
+            for k in range(self.n_outputs):
+                y_ik = y[i * self.y_stride + k]
+                sum_left[k] += w * y_ik
+
+            self.weighted_n_left += w
+
+        self.weighted_n_right = (self.weighted_n_node_samples -
+                                 self.weighted_n_left)
+        for k in range(self.n_outputs):
+            sum_right[k] = sum_total[k] - sum_left[k]
+
+
+        self.pos = pos2 - pos1 + self.start
+        return 0
+
+
     cdef int update(self, SIZE_t new_pos) nogil except -1:
         """Updated statistics by moving samples[pos:new_pos] to the left."""
 
@@ -899,6 +956,12 @@ cdef class RegressionCriterion(Criterion):
         for k in range(self.n_outputs):
             dest[k] = self.sum_total[k] / self.weighted_n_node_samples
 
+        #printf("%.1f\n",self.sum_total[0])
+        #printf("%.1f\n",dest[0])
+        #printf("\n")
+
+
+
 
 cdef class MSE(RegressionCriterion):
     """Mean squared error impurity criterion.
@@ -915,8 +978,13 @@ cdef class MSE(RegressionCriterion):
         cdef SIZE_t k
 
         impurity = self.sq_sum_total / self.weighted_n_node_samples
+
         for k in range(self.n_outputs):
             impurity -= (sum_total[k] / self.weighted_n_node_samples)**2.0
+
+
+        #printf("%.1f\n", impurity / self.n_outputs)
+
 
         return impurity / self.n_outputs
 
@@ -942,6 +1010,8 @@ cdef class MSE(RegressionCriterion):
         for k in range(self.n_outputs):
             proxy_impurity_left += sum_left[k] * sum_left[k]
             proxy_impurity_right += sum_right[k] * sum_right[k]
+
+
 
         return (proxy_impurity_left / self.weighted_n_left +
                 proxy_impurity_right / self.weighted_n_right)
@@ -970,12 +1040,14 @@ cdef class MSE(RegressionCriterion):
         cdef SIZE_t k
         cdef DOUBLE_t w = 1.0
         cdef DOUBLE_t y_ik
-
+        #printf("%d,%d\n",start,pos)
         for p in range(start, pos):
             i = samples[p]
+            #printf("%d\n", i)
 
             if sample_weight != NULL:
                 w = sample_weight[i]
+
 
             for k in range(self.n_outputs):
                 y_ik = y[i * self.y_stride + k]
@@ -986,12 +1058,20 @@ cdef class MSE(RegressionCriterion):
         impurity_left[0] = sq_sum_left / self.weighted_n_left
         impurity_right[0] = sq_sum_right / self.weighted_n_right
 
+
+        #printf("%.1f,%.1f,%.1f\n",sq_sum_left,self.weighted_n_left, impurity_left[0])
+
         for k in range(self.n_outputs):
             impurity_left[0] -= (sum_left[k] / self.weighted_n_left) ** 2.0
             impurity_right[0] -= (sum_right[k] / self.weighted_n_right) ** 2.0
 
+        #printf("%.1f\n", impurity_left[0])
+
         impurity_left[0] /= self.n_outputs
         impurity_right[0] /= self.n_outputs
+
+        #printf("%.1f,%.1f\n", impurity_left[0],impurity_right[0])
+
 
 cdef class MAE(RegressionCriterion):
     """Mean absolute error impurity criterion
